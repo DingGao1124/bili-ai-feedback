@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+#
+# Pre-commit hook for bili-ai-feedback.
+# Blocks commits that would publish secrets or broken code.
+#
+# Checks:
+#   1. No .env / secret file is staged (`.env.example` is allowed)
+#   2. No real credentials (Bilibili cookies, API keys) in the staged diff
+#   3. No merge conflict markers in the staged diff
+#   4. Typecheck passes for server + web (skipped if bun is missing)
+#
+# Install (after `git init`):
+#   git config core.hooksPath .githooks
+
+set -uo pipefail
+
+HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
+RED=$'\033[31m'; GREEN=$'\033[32m'; BOLD=$'\033[1m'; NC=$'\033[0m'
+
+# ---- 1. Block secret files ------------------------------------------------
+# Block `.env`, `.env.local`, ... but allow the `.env.example` template.
+blocked="$(git diff --cached --name-only --diff-filter=ACM \
+  | grep -E '(^|/)\.env($|\.)' \
+  | grep -vE '\.env\.example$' || true)"
+if [[ -n "$blocked" ]]; then
+  echo "${RED}✋${NC} ${BOLD}Pre-commit blocked:${NC} secret file(s) staged:" >&2
+  printf '%s\n' "$blocked" | sed 's/^/   - /' >&2
+  echo "   Unstage them:  git rm --cached <file>" >&2
+  exit 1
+fi
+
+# ---- 2. Scan staged diff for credentials ----------------------------------
+# Exclude .githooks/ — its contents ARE the detection rules and would
+# always self-match. Filter out blank/comment lines from the pattern file
+# (an empty pattern would match every line and false-positive the whole diff).
+leak="$(git diff --cached -- . ':(exclude).githooks' \
+  | grep -nEf <(grep -vE '^[[:space:]]*($|#)' "$HOOK_DIR/secret-patterns") \
+  || true)"
+if [[ -n "$leak" ]]; then
+  echo "${RED}✋${NC} ${BOLD}Pre-commit blocked:${NC} possible credentials in the staged diff:" >&2
+  printf '%s\n' "$leak" | sed 's/^/   /' >&2
+  echo "   Move secrets into .env (gitignored) before committing." >&2
+  exit 1
+fi
+
+# ---- 3. Merge conflict markers --------------------------------------------
+conflict="$(git diff --cached | grep -nE '^\+?(<<<<<<<|>>>>>>>)' || true)"
+if [[ -n "$conflict" ]]; then
+  echo "${RED}✋${NC} ${BOLD}Pre-commit blocked:${NC} merge conflict markers found (<<<<<<< / >>>>>>>)." >&2
+  exit 1
+fi
+
+# ---- 4. Typecheck (server + web) -------------------------------------------
+# tsc is silent on success, so run it in the background with a live spinner
+# and report elapsed time — otherwise the commit looks like it's hung.
+run_typecheck() {
+  local log=/tmp/pre-commit-typecheck.log
+  local start
+  start="$(date +%s)"
+  bun run typecheck >"$log" 2>&1 &
+  local pid=$!
+  local spin=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  local i=0
+  while kill -0 "$pid" 2>/dev/null; do
+    printf '\r⏳  typecheck %s  ' "${spin[i]}"
+    i=$(( (i + 1) % ${#spin[@]} ))
+    sleep 0.2
+  done
+  wait "$pid"
+  local code=$?
+  local sec=$(( $(date +%s) - start ))
+  printf '\r\033[K'
+  if [[ $code -eq 0 ]]; then
+    echo "${GREEN}✅${NC} Typecheck passed (${sec}s)."
+  else
+    echo "${RED}✋${NC} Typecheck failed (${sec}s)."
+  fi
+  return "$code"
+}
+
+if command -v bun >/dev/null 2>&1; then
+  if run_typecheck; then
+    :  # success message already printed
+  else
+    echo "${BOLD}Pre-commit blocked:${NC} typecheck failed — last lines:" >&2
+    tail -20 /tmp/pre-commit-typecheck.log >&2
+    exit 1
+  fi
+else
+  echo "${BOLD}⚠️  bun not found — skipped typecheck.${NC} Install: https://bun.sh" >&2
+fi
+
+echo "${GREEN}✅${NC} All pre-commit checks passed."
+exit 0

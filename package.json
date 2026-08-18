@@ -1,0 +1,21 @@
+{
+  "name": "bili-ai-feedback",
+  "version": "1.0.0",
+  "description": "B站评论弹幕 AI 分析工具 — 观众反馈分析平台",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "bun run --filter '*' dev",
+    "dev:server": "bun run --filter '@bili-feedback/server' dev",
+    "dev:web": "bun run --filter '@bili-feedback/web' dev",
+    "build": "bun run --filter '*' build",
+    "typecheck": "bun run --filter '*' typecheck",
+    "postinstall": "git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git config core.hooksPath .githooks || true"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.3"
+  }
+}
