@@ -6,6 +6,9 @@
   "workspaces": [
     "apps/*"
   ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "bun run --filter '*' dev",
     "dev:server": "bun run --filter '@bili-feedback/server' dev",

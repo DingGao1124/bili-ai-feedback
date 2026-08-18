@@ -36,21 +36,89 @@ bili-ai-feedback/
 
 完整架构与设计决策见 `docs/项目架构.md`。
 
-## 运行
+## 安装与运行
+
+### 1. 环境要求
+
+| 依赖 | 版本 | 说明 |
+|---|---|---|
+| **bun** | ≥ 1.0（建议 1.3+） | 包管理 + 运行时，monorepo 依赖它，**必须先装** |
+| Node.js | ≥ 22 | 后端 NestJS 与前端 Vite 基于 Node 运行（由 bun 启动） |
+
+### 2. 安装 bun
+
+bun 是这套项目唯一缺一不可的依赖。若已安装可跳过（用 `bun --version` 验证）。
+
+**macOS / Linux（官方脚本，推荐）：**
 
 ```bash
-# 安装依赖
+curl -fsSL https://bun.sh/install | bash
+# 安装后需让 shell 生效（新开终端即可）
+bun --version
+```
+
+**macOS（Homebrew）：**
+
+```bash
+brew install oven-sh/bun/bun
+```
+
+**Linux / WSL（apt 或 npm 方式）：**
+
+```bash
+# 方式一：npm 全局安装（需先有 Node ≥ 18）
+npm install -g bun
+
+# 方式二：apt（仅部分发行版可用）
+# 见 https://bun.sh/docs/installation
+```
+
+**Windows（PowerShell）：**
+
+```powershell
+# 官方脚本（建议用 WSL / Git Bash 体验更好）
+powershell -c "irm bun.sh/install.ps1 | iex"
+
+# 或 npm 全局安装
+npm install -g bun
+```
+
+安装完成后验证：
+
+```bash
+bun --version   # 输出类似 1.3.x 即成功
+```
+
+> 提示：bun 依赖 Node 生态，但自身是独立运行时。`bun install` / `bun run` 由 bun 全权接管，无需手动配 npm。
+
+### 3. 安装项目依赖
+
+```bash
+# 在项目根目录（bili-ai-feedback/）执行
 bun install
+```
 
-# 后端环境变量（可选，不配也能跑）
+这一步会装好前后端所有依赖（monorepo workspaces），并**自动安装 pre-commit 钩子**（详见下文「提交前校验」）。
+
+### 4. 配置环境变量（可选，不配也能跑）
+
+```bash
 cp apps/server/.env.example apps/server/.env
+```
 
+- 不配 `BILI_COOKIE`：仍可抓公开数据（实测热门视频可正常分析）。
+- 不配 `LLM_*`：分析自动回退本地启发式摘要，demo 端到端可跑。
+- 完整配置项见下方「环境变量」表。
+
+### 5. 启动
+
+```bash
 # 同时启动前后端（前端 :5173，后端 :3001，/api 已配代理）
 bun run dev
 
-# 或分开启动（前后端分开启动）
-bun run dev:server
-bun run dev:web
+# 或分开启动
+bun run dev:server   # 只起后端 :3001
+bun run dev:web      # 只起前端 :5173
 ```
 
 打开 http://localhost:5173 ，输入 BV 号（如 `BV1j4411W7F7`）即可分析。
