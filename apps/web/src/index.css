@@ -1,24 +1,24 @@
 @import 'tailwindcss';
 
 :root {
-  --background: 0 0% 100%;
-  --foreground: 222.2 84% 4.9%;
+  --background: 210 20% 99%;
+  --foreground: 222 31% 14%;
   --card: 0 0% 100%;
-  --card-foreground: 222.2 84% 4.9%;
-  --primary: 337 82% 56%;
+  --card-foreground: 222 31% 14%;
+  --primary: 348 96% 72%;
   --primary-foreground: 0 0% 100%;
-  --secondary: 210 40% 96.1%;
-  --secondary-foreground: 222.2 47.4% 11.2%;
-  --muted: 210 40% 96.1%;
-  --muted-foreground: 215.4 16.3% 46.9%;
-  --accent: 199 89% 48%;
+  --secondary: 215 24% 95%;
+  --secondary-foreground: 222 22% 20%;
+  --muted: 215 24% 96%;
+  --muted-foreground: 215 13% 45%;
+  --accent: 196 100% 46%;
   --accent-foreground: 0 0% 100%;
   --destructive: 0 84.2% 60.2%;
   --destructive-foreground: 210 40% 98%;
-  --border: 214.3 31.8% 91.4%;
-  --input: 214.3 31.8% 91.4%;
-  --ring: 337 82% 56%;
-  --radius: 0.75rem;
+  --border: 216 24% 90%;
+  --input: 216 24% 88%;
+  --ring: 348 96% 72%;
+  --radius: 0.875rem;
 }
 
 @theme inline {
@@ -51,5 +51,21 @@
   body {
     @apply bg-background text-foreground;
     font-family: system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    min-width: 320px;
+    text-rendering: optimizeLegibility;
+  }
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+@layer components {
+  .section-title {
+    @apply relative pl-3 text-base;
+  }
+  .section-title::before {
+    content: '';
+    @apply absolute inset-y-0 left-0 w-1 rounded-full bg-primary;
   }
 }

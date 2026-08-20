@@ -10,11 +10,12 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "bun run --filter '*' dev",
+    "dev": "bun run scripts/dev.mjs",
     "dev:server": "bun run --filter '@bili-feedback/server' dev",
     "dev:web": "bun run --filter '@bili-feedback/web' dev",
     "build": "bun run --filter '*' build",
     "typecheck": "bun run --filter '*' typecheck",
+    "test": "bun run --filter '@bili-feedback/server' test",
     "postinstall": "git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git config core.hooksPath .githooks || true"
   },
   "devDependencies": {

@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
-import { requestLogger } from './common/request-logger.middleware';
+import { HttpLoggingInterceptor } from './common/http-logging.interceptor';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -11,7 +11,7 @@ async function bootstrap() {
   app.enableCors({ origin: true, credentials: true });
   app.setGlobalPrefix('api');
   app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true }));
-  app.use(requestLogger);
+  app.useGlobalInterceptors(new HttpLoggingInterceptor());
 
   const port = process.env.PORT ? Number(process.env.PORT) : 3001;
   await app.listen(port);

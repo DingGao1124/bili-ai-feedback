@@ -1,106 +1,150 @@
-import { Injectable, Logger } from '@nestjs/common';
-import type {
-  AnalysisResult,
-  Comment,
-  Danmaku,
-  KeyFeedback,
-  VideoMeta,
-} from '../types';
-
+import { Injectable } from '@nestjs/common';
+import type { AnalysisJobView, AnalysisReport } from '../types';
 import { BilibiliService } from './bilibili.service';
-import { LlmService } from './llm.service';
-import {
-  buildTimeline,
-  pickKeyFeedbacks,
-  sentimentBreakdown,
-  topKeywords,
-} from '../utils/heuristics';
+import { AnalysisJobStore } from './analysis-job.store';
+import { FeedbackProcessorService } from './feedback-processor.service';
+import { FeedbackAgentService } from './feedback-agent.service';
 
-const SYSTEM_PROMPT = `你是B站创作者的观众反馈分析助手。站在UP主视角，从评论和弹幕里提炼对下一期创作有用的信息。只输出JSON。`;
-
-interface LlmOutput {
-  summary: string;
-  keyFeedbacks: KeyFeedback[];
-}
+type QueuedTask = { jobId: string; mode: 'full' | 'ai-only' };
 
 @Injectable()
 export class AnalysisService {
-  private readonly logger = new Logger(AnalysisService.name);
+  private readonly queue: QueuedTask[] = [];
+  private readonly queuedKeys = new Set<string>();
+  private active = 0;
+  private readonly maxConcurrent = 2;
 
   constructor(
     private readonly bili: BilibiliService,
-    private readonly llm: LlmService,
+    private readonly jobs: AnalysisJobStore,
+    private readonly processor: FeedbackProcessorService,
+    private readonly agent: FeedbackAgentService,
   ) {}
 
-  async analyze(input: string): Promise<AnalysisResult> {
+  create(input: string): AnalysisJobView {
     const bvid = this.bili.parseBvid(input);
-    const meta = await this.bili.getVideoMeta(bvid);
+    const job = this.jobs.create(input, bvid);
+    this.enqueue({ jobId: job.id, mode: 'full' });
+    return job;
+  }
 
-    // 弹幕和评论并行拉取。
-    const [danmaku, comments] = await Promise.all([
-      this.bili.getDanmaku(meta),
-      this.bili.getComments(meta),
+  retry(jobId: string): AnalysisJobView {
+    this.jobs.resetAi(jobId);
+    this.enqueue({ jobId, mode: 'ai-only' });
+    return this.jobs.getView(jobId);
+  }
+
+  private enqueue(task: QueuedTask): void {
+    const key = `${task.jobId}:${task.mode}`;
+    if (this.queuedKeys.has(key)) return;
+    this.queuedKeys.add(key);
+    this.queue.push(task);
+    void this.processQueue();
+  }
+
+  private async processQueue(): Promise<void> {
+    while (this.active < this.maxConcurrent && this.queue.length > 0) {
+      const task = this.queue.shift()!;
+      this.queuedKeys.delete(`${task.jobId}:${task.mode}`);
+      this.active += 1;
+      void this.runTask(task).finally(() => {
+        this.active -= 1;
+        void this.processQueue();
+      });
+    }
+  }
+
+  private async runTask(task: QueuedTask): Promise<void> {
+    if (task.mode === 'full') {
+      try {
+        await this.fetchAndPrepare(task.jobId);
+      } catch (error) {
+        this.jobs.fail(task.jobId, 'fetch_failed', this.message(error));
+        return;
+      }
+    }
+
+    try {
+      await this.runAi(task.jobId);
+    } catch (error) {
+      this.jobs.fail(task.jobId, 'ai_failed', this.message(error));
+    }
+  }
+
+  private async fetchAndPrepare(jobId: string): Promise<void> {
+    this.jobs.setStatus(jobId, 'fetching', '读取视频信息', 3);
+    const job = this.jobs.getRecord(jobId);
+    const meta = await this.bili.getVideoMeta(job.bvid);
+    this.jobs.setMeta(jobId, meta);
+    this.jobs.setProgress(jobId, 8, '视频信息读取完成，开始抓取弹幕和评论');
+
+    const [danmaku, commentResult] = await Promise.all([
+      this.bili.getDanmaku(meta, (completed, total) => {
+        this.jobs.setProgress(
+          jobId,
+          8 + (completed / total) * 36,
+          `弹幕时间窗 ${completed}/${total}`,
+        );
+      }),
+      this.bili.getCommentsForAnalysis(meta, (fetched, target) => {
+        this.jobs.setProgress(
+          jobId,
+          8 + Math.min(1, fetched / target) * 36,
+          `已抓取评论 ${fetched}/${target}`,
+        );
+      }),
     ]);
 
-    const danmakuTexts = danmaku.map((d) => d.content);
-    const commentTexts = comments.map((c) => c.content);
-    const allTexts = [...commentTexts, ...danmakuTexts];
+    this.jobs.patchCoverage(jobId, {
+      commentsTotal: commentResult.allCount,
+      commentsFetched: commentResult.items.length,
+      danmakuFetched: danmaku.length,
+    });
+    this.jobs.setStatus(jobId, 'preprocessing', '整理原始数据与统计图表', 48);
+    const raw = this.processor.buildRawSnapshot(
+      danmaku,
+      commentResult.items,
+      meta.duration,
+    );
+    this.jobs.setRawData(jobId, { danmaku, comments: commentResult.items, raw });
+    this.jobs.setProgress(jobId, 55, '原始数据已就绪');
+  }
 
-    // 确定性部分：热词、情感分布、时间轴曲线。
-    const topics = topKeywords(allTexts);
-    const sentiment = sentimentBreakdown(allTexts);
-    const timeline = buildTimeline(danmaku, meta.duration);
+  private async runAi(jobId: string): Promise<void> {
+    this.jobs.setStatus(jobId, 'semantic_mapping', '构建分层语义样本', 58);
+    const digest = this.processor.buildDigest(this.jobs.getRecord(jobId));
+    this.jobs.patchCoverage(jobId, {
+      semanticComments: digest.comments.length,
+      semanticDanmaku: digest.danmaku.length,
+    });
+    this.jobs.setProgress(
+      jobId,
+      64,
+      `语义样本：${digest.comments.length} 条评论、${digest.danmaku.length} 条弹幕`,
+    );
+    this.jobs.setStatus(jobId, 'agent_running', 'AI 正在归纳反馈并写入报告', 68);
+    await this.agent.run(jobId, digest);
 
-    // 摘要 + 高价值反馈：优先 LLM，失败回退启发式。
-    const llmOut = await this.askLlm(meta.title, comments, danmaku);
-    const aiGenerated = llmOut !== null;
-
-    return {
-      meta,
-      summary: llmOut?.summary ?? this.heuristicSummary(meta, comments, danmaku),
-      topics,
-      sentiment,
-      keyFeedbacks: llmOut?.keyFeedbacks ?? pickKeyFeedbacks(comments),
-      timeline,
-      aiGenerated,
+    this.jobs.setStatus(jobId, 'validating', '校验分析证据与报告结构', 94);
+    const job = this.jobs.getRecord(jobId);
+    if (!job.meta || !job.raw) throw new Error('任务原始数据缺失');
+    const partial = job.partialReport;
+    const report: AnalysisReport = {
+      meta: job.meta,
+      summary: partial.summary!,
+      topics: partial.topics!,
+      sentiment: partial.sentiment!,
+      timeline: job.raw.timeline,
+      coreFeedbacks: partial.coreFeedbacks!,
+      highValueFeedbacks: partial.highValueFeedbacks!,
+      suggestions: partial.suggestions!,
+      coverage: { ...job.coverage },
+      generatedAt: new Date().toISOString(),
     };
+    this.jobs.complete(jobId, report);
   }
 
-  private async askLlm(
-    title: string,
-    comments: Comment[],
-    danmaku: Danmaku[],
-  ): Promise<LlmOutput | null> {
-    if (!this.llm.enabled) return null;
-
-    // 控制 token：评论取热度前 60 条，弹幕取前 200 条。
-    const topComments = comments
-      .slice()
-      .sort((a, b) => b.like - a.like)
-      .slice(0, 60)
-      .map((c) => `[LV${c.level} 赞${c.like}] ${c.content}`);
-    const dmSample = danmaku.slice(0, 200).map((d) => d.content);
-
-    const user = `视频标题：${title}
-
-评论（按热度）：
-${topComments.join('\n')}
-
-弹幕样本：
-${dmSample.join(' / ')}
-
-请返回JSON，字段：
-- summary: 两三句话总结观众在讨论什么、整体情绪、以及对下一期最值得注意的点。
-- keyFeedbacks: 数组，最多5条最有价值的反馈，每条 {content, source:"comment"|"danmaku", reason, sentiment:"positive"|"neutral"|"negative"}。`;
-
-    return this.llm.completeJson<LlmOutput>(SYSTEM_PROMPT, user);
-  }
-
-  private heuristicSummary(
-    meta: VideoMeta,
-    comments: Comment[],
-    danmaku: Danmaku[],
-  ): string {
-    return `《${meta.title}》分析基于 ${danmaku.length} 条弹幕（当前弹幕池，历史累计 ${meta.danmakuCount.toLocaleString()} 条）与按热度采样的 ${comments.length} 条评论。当前为本地启发式摘要（未配置 LLM），高价值反馈按用户等级与互动量排序。配置 LLM_* 环境变量后可获得 AI 生成的话题总结与改进建议。`;
+  private message(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 }

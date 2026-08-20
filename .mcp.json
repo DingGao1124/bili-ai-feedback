@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "cluade-docs-langchain": {
+      "url": "https://docs.langchain.com/mcp"
+    },
+    "claude-reference-langchain": {
+      "url": "https://reference.langchain.com/mcp"
+    }
+  }
+}

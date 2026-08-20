@@ -46,6 +46,7 @@ const DANMAKU_MIN_SPLIT_MS = 10_000;
 export class BilibiliService {
   private readonly logger = new Logger(BilibiliService.name);
   private readonly cookie = process.env.BILI_COOKIE ?? '';
+  private mixinKeyCache?: { value: string; expiresAt: number };
   private readonly reply = protobuf
     .parse(DM_PROTO)
     .root.lookupType('DmSegMobileReply');
@@ -123,8 +124,13 @@ export class BilibiliService {
 
   /** 获取 WBI mixin key，失败返回 null（调用方据此回退或报错）。 */
   private async resolveMixinKey(): Promise<string | null> {
+    if (this.mixinKeyCache && this.mixinKeyCache.expiresAt > Date.now()) {
+      return this.mixinKeyCache.value;
+    }
     try {
-      return await this.getWbiMixinKey();
+      const value = await this.getWbiMixinKey();
+      this.mixinKeyCache = { value, expiresAt: Date.now() + 5 * 60_000 };
+      return value;
     } catch (err) {
       this.logger.warn(`WBI key 获取失败: ${String(err)}`);
       return null;
@@ -135,12 +141,23 @@ export class BilibiliService {
    * 拉取全部弹幕。按 2 分钟时间窗覆盖视频时长；
    * 窗口内返回条数达到截断阈值时，二分细分窗口继续拉，直到取全该窗口。
    */
-  async getDanmaku(meta: VideoMeta): Promise<Danmaku[]> {
+  async getDanmaku(
+    meta: VideoMeta,
+    onProgress?: (completedWindows: number, totalWindows: number) => void,
+  ): Promise<Danmaku[]> {
     const mixinKey = await this.resolveMixinKey();
     const durationMs = meta.duration * 1000;
     const all: Danmaku[] = [];
-    await this.collectDanmaku(meta, 0, durationMs, mixinKey, all);
-    return all;
+    const totalWindows = Math.max(1, Math.ceil(durationMs / DANMAKU_WINDOW_MS));
+    for (let index = 0; index < totalWindows; index += 1) {
+      const start = index * DANMAKU_WINDOW_MS;
+      const end = Math.min(start + DANMAKU_WINDOW_MS, durationMs);
+      await this.collectDanmaku(meta, start, end, mixinKey, all);
+      onProgress?.(index + 1, totalWindows);
+    }
+    return [...new Map(all.map((item) => [item.id, item])).values()].sort(
+      (a, b) => a.progress - b.progress,
+    );
   }
 
   /**
@@ -273,22 +290,62 @@ export class BilibiliService {
 
   /** 拉取评论（供分析用），按热度最多翻 maxPages 页（每页约 20 条）。 */
   async getComments(meta: VideoMeta, maxPages = 50): Promise<Comment[]> {
+    return (await this.getCommentCollection(meta, 3, maxPages * 20)).items;
+  }
+
+  /** 分析任务使用：热门最多 2000 条 + 最新最多 500 条，按 rpid 去重。 */
+  async getCommentsForAnalysis(
+    meta: VideoMeta,
+    onProgress?: (fetched: number, target: number) => void,
+  ): Promise<{ items: Comment[]; allCount: number }> {
+    const hot = await this.getCommentCollection(meta, 3, 2_000, (count) =>
+      onProgress?.(count, 2_500),
+    );
+    const recent = await this.getCommentCollection(meta, 2, 500, (count) =>
+      onProgress?.(Math.min(2_000, hot.items.length) + count, 2_500),
+    );
+    const merged = new Map<string, Comment>();
+    for (const item of hot.items) merged.set(item.rpid, { ...item, collectedFrom: 'hot' });
+    for (const item of recent.items) {
+      const existing = merged.get(item.rpid);
+      merged.set(item.rpid, {
+        ...item,
+        collectedFrom: existing ? 'both' : 'recent',
+      });
+    }
+    return {
+      items: [...merged.values()],
+      allCount: Math.max(hot.allCount, recent.allCount),
+    };
+  }
+
+  private async getCommentCollection(
+    meta: VideoMeta,
+    mode: 2 | 3,
+    maxItems: number,
+    onProgress?: (fetched: number) => void,
+  ): Promise<{ items: Comment[]; allCount: number }> {
     const out: Comment[] = [];
     let offset = '';
+    let allCount = 0;
+    const maxPages = Math.ceil(maxItems / 20);
     for (let page = 1; page <= maxPages; page += 1) {
       let data: CommentPage;
       try {
-        data = await this.getCommentPage(meta, { mode: 3, offset });
+        data = await this.getCommentPage(meta, { mode, offset });
       } catch (err) {
-        this.logger.warn(`评论第 ${page} 页拉取失败: ${String(err)}`);
+        this.logger.warn(`评论 mode=${mode} 第 ${page} 页拉取失败: ${String(err)}`);
         break;
       }
+      allCount = Math.max(allCount, data.allCount);
       if (data.items.length === 0) break;
       out.push(...data.items);
+      onProgress?.(out.length);
+      if (out.length >= maxItems) break;
       if (data.isEnd || !data.nextOffset) break;
       offset = data.nextOffset;
     }
-    return out;
+    return { items: out.slice(0, maxItems), allCount };
   }
 
   private buildCommentUrl(
